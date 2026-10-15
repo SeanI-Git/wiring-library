@@ -1,7 +1,7 @@
 // Keeps the app itself (not the diagrams, the page handles those) available with no signal.
 // Always tries the network first so changes on GitHub show up right away,
 // and falls back to the saved copy when there's no signal.
-const SHELL = 'wl-shell-v3';
+const SHELL = 'wl-shell-v4';
 const FILES = ['./', './index.html', './config.js', './manifest.json', './icon-192.png', './icon-512.png',
   './apple-touch-icon.png', './lib/pdf.min.mjs', './lib/pdf.worker.min.mjs', './lib/qrcode.js'];
 

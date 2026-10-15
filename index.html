@@ -7,8 +7,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Wiring">
-<title>Wiring Library</title>
+<meta name="apple-mobile-web-app-title" content="GAFwire">
+<title>GAFwire</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png">
@@ -290,7 +290,7 @@ function render() {
   if (route().view === 'qr') return renderQr(route().args);   // sticker page needs no library data
   if (needPin) return renderPin();
   if (!catalog) {
-    app.innerHTML = bar(CFG.APP_NAME || 'Wiring Library') + `<main>${loadError
+    app.innerHTML = bar(CFG.APP_NAME || 'GAFwire') + `<main>${loadError
       ? `<div class="empty"><b>Library not loaded</b>${esc(loadError)}<div class="actions"><button class="btn primary" data-act="retry">Retry</button></div></div>`
       : '<p class="foot">Loading the library…</p>'}</main>`;
     return;
@@ -307,7 +307,7 @@ const banner = () => offline ? `<div class="notice">No connection. Showing the s
 function renderHome(resultsOnly) {
   const out = document.getElementById('results');
   if (resultsOnly && out) { out.innerHTML = homeBody(); return; }
-  app.innerHTML = bar(CFG.APP_NAME || 'Wiring Library', false, true) + `<main>${banner()}<div id="results">${homeBody()}</div>
+  app.innerHTML = bar(CFG.APP_NAME || 'GAFwire', false, true) + `<main>${banner()}<div id="results">${homeBody()}</div>
     <div class="help"><button data-act="missing">Can't find your device?</button></div></main>`;
 }
 
@@ -457,7 +457,7 @@ async function renderQr(args) {
 }
 
 function renderPin() {
-  app.innerHTML = bar(CFG.APP_NAME || 'Wiring Library') + `<main><form class="pin" id="pinform"><h2>Enter the shop PIN</h2>
+  app.innerHTML = bar(CFG.APP_NAME || 'GAFwire') + `<main><form class="pin" id="pinform"><h2>Enter the shop PIN</h2>
     <p class="foot" style="margin:0">Ask your lead or QA/QC for it. You only enter it once on this phone.</p>
     <input id="pin" inputmode="numeric" autocomplete="off" aria-label="Shop PIN" autofocus>
     <button class="btn primary block" type="submit">Open the library</button>

@@ -5,5 +5,5 @@ window.WL_CONFIG = {
   //   API_URL: 'https://script.google.com/macros/s/AKfy....../exec',
   API_URL: 'https://script.google.com/macros/s/AKfycby0ga_bw_syFKKAP-OlYY-k6Zfhsf4aEtI7uxmqfZ0Zs9CatAcHC9Vg6yJznAYyX3oF/exec',
   // Shown at the top of the app.
-  APP_NAME: 'Wiring Library'
+  APP_NAME: 'GAFwire'
 };

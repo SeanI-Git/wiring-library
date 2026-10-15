@@ -1,6 +1,6 @@
 {
-  "name": "Wiring Library",
-  "short_name": "Wiring",
+  "name": "GAFwire",
+  "short_name": "GAFwire",
   "description": "Wiring diagrams for the devices we build into skids.",
   "start_url": "./",
   "scope": "./",
