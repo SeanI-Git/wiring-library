@@ -113,6 +113,11 @@
   .pin input { width: 100%; text-align: center; font-size: 28px; letter-spacing: 8px; padding: 12px; border-radius: 8px;
                border: 2px solid var(--rule); background: var(--panel); margin: 14px 0; }
 
+  .install p { margin: 0 0 12px; }
+  .install-steps { background: var(--panel); border-radius: 8px; padding: 12px 14px 4px; margin: 14px 0 6px; }
+  .install-steps ol { margin: 6px 0 10px; padding-left: 22px; }
+  .install-steps li { margin-bottom: 6px; }
+  .install .btn { margin-top: 14px; }
   .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 10; display: flex; align-items: flex-end; justify-content: center; }
   .sheet { background: var(--plate); width: 100%; max-width: 760px; border-radius: 14px 14px 0 0; padding: 18px 16px;
            padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); max-height: 90vh; overflow: auto; }
@@ -147,6 +152,16 @@ const app = document.getElementById('app');
 const LS = { pin: 'wl-pin', cat: 'wl-catalog' };
 const DOC_CACHE = 'wl-docs';
 
+/* Installed (opened from the home screen) vs. a normal browser tab. Only the installed app
+   downloads the library in the background: iPhone keeps the browser's copy and the home-screen
+   app's copy separately, and clears a browser tab's saved files after a week or so of not using it. */
+const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const UA = navigator.userAgent;
+const IOS = /iPhone|iPad|iPod/.test(UA) || (/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
+const ANDROID = /Android/.test(UA);
+let skipInstall = sessionStorage.getItem('wl-skip-install') === '1';
+let pf = { total: 0, done: 0, active: false, full: false };   // background download progress
+
 let catalog = null;      // { version, entries, aliases }
 let groups = [];         // one per device (diagram preferred, manual attached)
 let offline = false;
@@ -174,15 +189,41 @@ function buildGroups(entries) {
     a.mfr.localeCompare(b.mfr) || a.type.localeCompare(b.type) || a.model.localeCompare(b.model, undefined, { numeric: true }) || a.variant.localeCompare(b.variant));
 }
 
-async function api(params) {
+/**
+ * One request to the library, with a time limit. Google occasionally answers with an error page
+ * instead of data (Safari reports that as "The string did not match the expected pattern");
+ * those are marked retryable.
+ */
+async function api(params, timeoutMs = 30000) {
   if (!CFG.API_URL || CFG.API_URL.includes('PASTE')) throw new Error('The app is not connected to the library yet. Put the web app URL in config.js.');
   const u = new URL(CFG.API_URL);
   Object.entries({ ...params, pin: localStorage.getItem(LS.pin) || '' }).forEach(([k, v]) => u.searchParams.set(k, v));
-  const r = await fetch(u.toString(), { redirect: 'follow' });
-  const j = await r.json();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  let r, text;
+  try {
+    r = await fetch(u.toString(), { redirect: 'follow', signal: ctl.signal });
+    text = await r.text();
+  } catch (e) {
+    const err = new Error(e.name === 'AbortError' ? 'The library took too long to answer.' : "Can't reach the library.");
+    err.retry = true; err.network = e.name !== 'AbortError'; throw err;
+  } finally { clearTimeout(timer); }
+  let j;
+  try { j = JSON.parse(text); } catch { const err = new Error('The library had a hiccup.'); err.retry = true; throw err; }
   if (!j.ok && j.error === 'pin') { const e = new Error('pin'); e.pin = true; throw e; }
   if (!j.ok) throw new Error(j.error || 'The library did not answer.');
   return j;
+}
+
+/** Try a request up to `tries` times, waiting a little longer each time. */
+async function withRetry(fn, tries, onRetry) {
+  for (let i = 1; ; i++) {
+    try { return await fn(); } catch (e) {
+      if (!e.retry || i >= tries) throw e;
+      if (onRetry) onRetry(i + 1, tries);
+      await new Promise(res => setTimeout(res, 1500 * i));
+    }
+  }
 }
 
 async function loadCatalog() {
@@ -192,36 +233,103 @@ async function loadCatalog() {
   } catch { /* ignore a corrupt saved copy */ }
   const before = JSON.stringify([catalog && catalog.version, offline, needPin, loadError]);
   try {
-    const j = await api({ action: 'catalog' });
+    const j = await withRetry(() => api({ action: 'catalog' }), 2);
     catalog = { version: j.version, entries: j.entries, aliases: j.aliases || [] };
     groups = buildGroups(catalog.entries);
     offline = false; needPin = false; loadError = '';
     try { localStorage.setItem(LS.cat, JSON.stringify(catalog)); } catch { /* storage full or blocked */ }
-    pruneDocCache();
+    pruneDocCache().then(prefetchAll);
   } catch (e) {
     if (e.pin) { needPin = true; }
     else if (catalog) { offline = true; }
-    else { loadError = e.name === 'TypeError' ? "Can't reach the library. Check that you're on WiFi, then tap Retry." : e.message; }
+    else { loadError = e.network ? "Can't reach the library. Check that you're on WiFi, then tap Retry." : e.message + ' Tap Retry.'; }
   }
   // Don't redraw (and re-render an open diagram) when nothing changed.
   if (JSON.stringify([catalog && catalog.version, offline, needPin, loadError]) !== before) render();
 }
 
-async function getDiagramBytes(entry) {
-  const key = `./__wl-doc/${encodeURIComponent(entry.id)}/${encodeURIComponent(entry.updated)}`;
-  let cache = null;
-  try { cache = 'caches' in window ? await caches.open(DOC_CACHE) : null; } catch { cache = null; }
+const docKey = e => `./__wl-doc/${encodeURIComponent(e.id)}/${encodeURIComponent(e.updated)}`;
+
+/* Background downloading stops once this much is saved on the phone. Diagrams someone opens
+   are always kept on top of this. Raise or lower it here (the install screen shows this number). */
+const PREFETCH_BUDGET_MB = 2048;
+const LS_SIZES = 'wl-docsizes';
+function docSizes() { try { return JSON.parse(localStorage.getItem(LS_SIZES) || '{}'); } catch { return {}; } }
+function saveDocSizes(m) { try { localStorage.setItem(LS_SIZES, JSON.stringify(m)); } catch { /* not critical */ } }
+function savedMB() { return Object.values(docSizes()).reduce((a, b) => a + b, 0) / 1048576; }
+const inflight = new Map();   // the same diagram is never downloaded twice at once
+
+async function openDocCache() {
+  try { return 'caches' in window ? await caches.open(DOC_CACHE) : null; } catch { return null; }
+}
+
+async function getDiagramBytes(entry, onRetry) {
+  const key = docKey(entry);
+  const cache = await openDocCache();
   if (cache) {
     const hit = await cache.match(key);
     if (hit) return new Uint8Array(await hit.arrayBuffer());
   }
-  const j = await api({ action: 'file', id: entry.id });
-  const bin = atob(j.b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  if (cache) { try { await cache.put(key, new Response(bytes, { headers: { 'Content-Type': 'application/pdf' } })); } catch { /* quota */ } }
-  return bytes;
+  if (inflight.has(key)) return inflight.get(key);
+  const job = (async () => {
+    const j = await withRetry(() => api({ action: 'file', id: entry.id }), 3, onRetry);
+    let bin;
+    try { bin = atob(j.b64); } catch { const e = new Error('The diagram arrived damaged.'); e.retry = true; throw e; }
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    if (cache) {
+      try {
+        await cache.put(key, new Response(bytes, { headers: { 'Content-Type': 'application/pdf' } }));
+        const m = docSizes(); m[new URL(key, location.href).pathname] = bytes.length; saveDocSizes(m);
+      } catch { /* phone storage full: still show it, just don't keep it */ }
+    }
+    return bytes;
+  })();
+  inflight.set(key, job);
+  try { return await job; } finally { inflight.delete(key); }
 }
+
+/**
+ * After the list loads, quietly download diagrams this phone doesn't have yet, one at a time,
+ * newest first, until PREFETCH_BUDGET_MB is used. Those then open instantly, even with no signal.
+ * Full manuals are never downloaded. Also warms up the PDF viewer.
+ */
+let prefetching = false;
+async function prefetchAll() {
+  if (prefetching || !catalog || !navigator.onLine || !STANDALONE) return;
+  prefetching = true;
+  try {
+    import('./lib/pdf.min.mjs').catch(() => {});
+    // Ask the phone to treat saved diagrams as important, so it doesn't clear them to free space.
+    try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch { /* optional */ }
+    const cache = await openDocCache();
+    if (!cache) return;
+    const todo = [];
+    const all = catalog.entries.filter(e => e.kind === 'Diagram');
+    for (const e of all) {
+      if (!(await cache.match(docKey(e)))) todo.push(e);
+    }
+    pf = { total: all.length, done: all.length - todo.length, active: todo.length > 0, full: false };
+    showPf();
+    todo.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));   // newest first
+    for (const e of todo) {
+      if (!navigator.onLine) break;
+      if (savedMB() >= PREFETCH_BUDGET_MB) { pf.full = true; break; }
+      try { await getDiagramBytes(e); pf.done++; showPf(); } catch (err) { if (err.pin || err.network) break; }
+      await new Promise(res => setTimeout(res, 300));
+    }
+  } finally { prefetching = false; pf.active = false; showPf(); }
+}
+
+function pfText() {
+  if (!STANDALONE || !pf.total) return '';
+  if (pf.full) return `Storage limit reached (${fmtSize(PREFETCH_BUDGET_MB * 1048576)}). The newest diagrams are saved; others download when you open them.`;
+  if (pf.active) return `Saving diagrams for offline use: ${pf.done} of ${pf.total}…`;
+  if (pf.done >= pf.total) return `All ${pf.total} diagrams are saved on this phone and work offline.`;
+  return '';
+}
+function showPf() { const el = document.getElementById('pf'); if (el) el.textContent = pfText(); }
+function fmtSize(b) { return b >= 1073741824 ? +(b / 1073741824).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1048576)) + ' MB'; }
 
 /** Drop cached diagrams that were replaced or retired. */
 async function pruneDocCache() {
@@ -229,10 +337,13 @@ async function pruneDocCache() {
   try {
     const live = new Set(catalog.entries.map(e => `/__wl-doc/${encodeURIComponent(e.id)}/${encodeURIComponent(e.updated)}`));
     const cache = await caches.open(DOC_CACHE);
+    const m = docSizes();
     for (const req of await cache.keys()) {
       const path = new URL(req.url).pathname;
-      if (![...live].some(l => path.endsWith(l))) await cache.delete(req);
+      if (![...live].some(l => path.endsWith(l))) { await cache.delete(req); delete m[path]; }
     }
+    for (const k of Object.keys(m)) if (![...live].some(l => k.endsWith(l))) delete m[k];
+    saveDocSizes(m);
   } catch { /* not critical */ }
 }
 
@@ -288,6 +399,9 @@ function bar(title, back, withSearch) {
 
 function render() {
   if (route().view === 'qr') return renderQr(route().args);   // sticker page needs no library data
+  if (route().view === 'install') return renderInstall();
+  // Phones in a browser tab see the install screen first. Links from QR stickers go straight to the diagram.
+  if (!STANDALONE && (IOS || ANDROID) && !skipInstall && route().view === 'home') return renderInstall();
   if (needPin) return renderPin();
   if (!catalog) {
     app.innerHTML = bar(CFG.APP_NAME || 'GAFwire') + `<main>${loadError
@@ -308,6 +422,7 @@ function renderHome(resultsOnly) {
   const out = document.getElementById('results');
   if (resultsOnly && out) { out.innerHTML = homeBody(); return; }
   app.innerHTML = bar(CFG.APP_NAME || 'GAFwire', false, true) + `<main>${banner()}<div id="results">${homeBody()}</div>
+    <p class="foot" id="pf" style="text-align:center">${esc(pfText())}</p>
     <div class="help"><button data-act="missing">Can't find your device?</button></div></main>`;
 }
 
@@ -383,6 +498,7 @@ function renderDoc(args) {
   app.innerHTML = bar(g.model, true) + `<main>${banner()}${head}${notes}
     <div class="actions">${manualBtn}<button class="btn" data-act="save-pdf" disabled>Save PDF</button><button class="btn fault" data-act="flag">Doesn't match my device</button></div>
     <div class="pages" id="pages"><div class="page">Loading the diagram…</div></div>
+    ${!STANDALONE && (IOS || ANDROID) ? '<p class="foot">Tip: <a href="#/install">put GAFwire on your home screen</a> so diagrams open instantly and work offline.</p>' : ''}
     <p class="foot">Updated ${esc(g.diagram.updated)}. Check the nameplate and the job drawings before you land wires.</p></main>`;
   app.dataset.doc = g.diagram.id;
   showPdf(g.diagram, ++viewToken);
@@ -392,7 +508,10 @@ let currentPdf = null;   // { bytes, name } for Save PDF
 async function showPdf(entry, token) {
   const pagesEl = () => document.getElementById('pages');
   try {
-    const bytes = await getDiagramBytes(entry);
+    const bytes = await getDiagramBytes(entry, (n, of) => {
+      const w = pagesEl(); const box = w && w.querySelector('.page');
+      if (box && token === viewToken) box.textContent = `Still loading… trying again (${n} of ${of})`;
+    });
     if (token !== viewToken) return;
     currentPdf = { bytes, name: [entry.mfr, entry.type, entry.model, entry.variant].filter(Boolean).join('__') + '.pdf' };
     const sb = document.querySelector('[data-act="save-pdf"]'); if (sb) sb.disabled = false;
@@ -429,7 +548,7 @@ async function showPdf(entry, token) {
     if (token !== viewToken) return;
     const w = pagesEl(); if (!w) return;
     if (e.pin) { needPin = true; render(); return; }
-    const off = !navigator.onLine || e.name === 'TypeError';
+    const off = !navigator.onLine || e.network;
     w.innerHTML = `<div class="empty"><b>${off ? "This diagram needs WiFi the first time" : "The diagram didn't load"}</b>${off
       ? "It hasn't been opened on this phone before. Get on the company WiFi and try again; after that it works offline."
       : esc(e.message)}<div class="actions"><button class="btn primary" data-act="reload-doc">Try again</button></div></div>`;
@@ -456,9 +575,34 @@ async function renderQr(args) {
   }
 }
 
+/* Install screen: shown to phones using GAFwire in a browser tab. */
+function renderInstall() {
+  const steps = (title, list) => `<div class="install-steps"><b>${title}</b><ol>${list.map(x => `<li>${x}</li>`).join('')}</ol></div>`;
+  const iphone = steps('iPhone (Safari)', [
+    'Tap the <b>Share</b> button. If you don\'t see it, tap <b>•••</b> first.',
+    'Tap <b>Add to Home Screen</b>. You may need to scroll down or tap <b>More</b> to find it.',
+    'Tap <b>Add</b>, then open GAFwire from your home screen.'
+  ]) + '<p class="foot" style="margin-top:4px">Using Chrome on iPhone? Tap <b>Share</b> in the address bar, then <b>Add to Home Screen</b>.</p>';
+  const android = steps('Android (Chrome)', [
+    'Tap <b>⋮</b> in the top right corner.',
+    'Tap <b>Add to Home screen</b> or <b>Install app</b>.',
+    'Tap <b>Install</b>, then open GAFwire from your home screen.'
+  ]);
+  app.innerHTML = bar(CFG.APP_NAME || 'GAFwire', route().view === 'install') + `<main class="install"><h2>Put ${esc(CFG.APP_NAME || 'GAFwire')} on your home screen</h2>
+    <p>Installed, it saves every wiring diagram on your phone. They open instantly and work with no signal. Full manuals still need a connection.</p>
+    <p class="foot" id="libsize">It will never use more than ${fmtSize(PREFETCH_BUDGET_MB * 1048576)} of storage.</p>
+    ${IOS ? iphone : ANDROID ? android : iphone + android}
+    <button class="btn block" data-act="skip-install">Not now, use it in the browser</button>
+    <p class="foot" style="text-align:center">In the browser, diagrams aren't saved for offline use.</p></main>`;
+  api({ action: 'stats' }, 15000).then(j => {
+    const el = document.getElementById('libsize');
+    if (el) el.textContent = `The library is ${fmtSize(j.diagramBytes || 0)} right now (${j.diagrams} diagrams). It will never use more than ${fmtSize(PREFETCH_BUDGET_MB * 1048576)} of storage.`;
+  }).catch(() => { /* size line is optional */ });
+}
+
 function renderPin() {
   app.innerHTML = bar(CFG.APP_NAME || 'GAFwire') + `<main><form class="pin" id="pinform"><h2>Enter the shop PIN</h2>
-    <p class="foot" style="margin:0">Ask your lead or QA/QC for it. You only enter it once on this phone.</p>
+    <p class="foot" style="margin:0">Ask your lead or QA/QC for it. You only enter it once on this phone.${STANDALONE ? ' After that, the wiring diagrams save to your phone in the background.' : ''}</p>
     <input id="pin" inputmode="numeric" autocomplete="off" aria-label="Shop PIN" autofocus>
     <button class="btn primary block" type="submit">Open the library</button>
     ${localStorage.getItem(LS.pin) ? '<p class="foot">That PIN didn\'t work. It may have changed.</p>' : ''}</form></main>`;
@@ -516,7 +660,8 @@ document.addEventListener('click', e => {
   const act = b.dataset.act;
   if (act === 'back') {
     const r = route(), a = r.args;
-    if (r.view === 'd' && a.length >= 2) location.hash = link('m', a[0], a[1]);
+    if (r.view === 'install') history.back();
+    else if (r.view === 'd' && a.length >= 2) location.hash = link('m', a[0], a[1]);
     else if (r.view === 'm' && a.length >= 2) location.hash = link('m', a[0]);
     else location.hash = '#/';
   }
@@ -525,6 +670,7 @@ document.addEventListener('click', e => {
   else if (act === 'flag') openSheet(b.dataset.label === 'request' ? 'request' : 'flag', app.dataset.doc);
   else if (act === 'missing') openSheet('missing', '');
   else if (act === 'reload-doc') render();
+  else if (act === 'skip-install') { skipInstall = true; sessionStorage.setItem('wl-skip-install', '1'); if (location.hash !== '#/') location.hash = '#/'; else render(); }
   else if (act === 'print') window.print();
   else if (act === 'save-pdf' && currentPdf) {
     const a = document.createElement('a');
