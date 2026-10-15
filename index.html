@@ -253,6 +253,7 @@ const docKey = e => `./__wl-doc/${encodeURIComponent(e.id)}/${encodeURIComponent
 /* Background downloading stops once this much is saved on the phone. Diagrams someone opens
    are always kept on top of this. Raise or lower it here (the install screen shows this number). */
 const PREFETCH_BUDGET_MB = 2048;
+const PREFETCH_PARALLEL = 4;   // downloads at the same time
 const LS_SIZES = 'wl-docsizes';
 function docSizes() { try { return JSON.parse(localStorage.getItem(LS_SIZES) || '{}'); } catch { return {}; } }
 function saveDocSizes(m) { try { localStorage.setItem(LS_SIZES, JSON.stringify(m)); } catch { /* not critical */ } }
@@ -312,12 +313,19 @@ async function prefetchAll() {
     pf = { total: all.length, done: all.length - todo.length, active: todo.length > 0, full: false };
     showPf();
     todo.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));   // newest first
-    for (const e of todo) {
-      if (!navigator.onLine) break;
-      if (savedMB() >= PREFETCH_BUDGET_MB) { pf.full = true; break; }
-      try { await getDiagramBytes(e); pf.done++; showPf(); } catch (err) { if (err.pin || err.network) break; }
-      await new Promise(res => setTimeout(res, 300));
-    }
+    // Several downloads at once: each request spends most of its time waiting on Google,
+    // so running a few side by side finishes the whole library several times faster.
+    let next = 0, stop = false;
+    const worker = async () => {
+      while (!stop && next < todo.length) {
+        const e = todo[next++];
+        if (!navigator.onLine) { stop = true; break; }
+        if (savedMB() >= PREFETCH_BUDGET_MB) { pf.full = true; stop = true; break; }
+        try { await getDiagramBytes(e); pf.done++; showPf(); }
+        catch (err) { if (err.pin || err.network) stop = true; }
+      }
+    };
+    await Promise.all(Array.from({ length: PREFETCH_PARALLEL }, worker));
   } finally { prefetching = false; pf.active = false; showPf(); }
 }
 
