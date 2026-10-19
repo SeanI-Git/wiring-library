@@ -147,10 +147,10 @@
 <body>
 <div id="app"></div>
 <script type="module">
-const CFG = window.WL_CONFIG || {};
-const app = document.getElementById('app');
-const LS = { pin: 'wl-pin', cat: 'wl-catalog' };
-const DOC_CACHE = 'wl-docs';
+ CFG = window.WL_CONFIG || {};
+ app = document.getElementById('app');
+ LS = { pin: 'wl-pin', cat: 'wl-catalog' };
+ DOC_CACHE = 'wl-docs';
 
 /* Installed (opened from the home screen) vs. a normal browser tab. Only the installed app
    downloads the library in the background: iPhone keeps the browser's copy and the home-screen
@@ -253,7 +253,7 @@ const docKey = e => `./__wl-doc/${encodeURIComponent(e.id)}/${encodeURIComponent
 /* Background downloading stops once this much is saved on the phone. Diagrams someone opens
    are always kept on top of this. Raise or lower it here (the install screen shows this number). */
 const PREFETCH_BUDGET_MB = 2048;
-const PREFETCH_PARALLEL = 4;   // downloads at the same time
+const PREFETCH_PARALLEL = 6;   // downloads at the same time
 const LS_SIZES = 'wl-docsizes';
 function docSizes() { try { return JSON.parse(localStorage.getItem(LS_SIZES) || '{}'); } catch { return {}; } }
 function saveDocSizes(m) { try { localStorage.setItem(LS_SIZES, JSON.stringify(m)); } catch { /* not critical */ } }
