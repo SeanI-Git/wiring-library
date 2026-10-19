@@ -147,10 +147,10 @@
 <body>
 <div id="app"></div>
 <script type="module">
- CFG = window.WL_CONFIG || {};
- app = document.getElementById('app');
- LS = { pin: 'wl-pin', cat: 'wl-catalog' };
- DOC_CACHE = 'wl-docs';
+const CFG = window.WL_CONFIG || {};
+const app = document.getElementById('app');
+const LS = { pin: 'wl-pin', cat: 'wl-catalog' };
+const DOC_CACHE = 'wl-docs';
 
 /* Installed (opened from the home screen) vs. a normal browser tab. Only the installed app
    downloads the library in the background: iPhone keeps the browser's copy and the home-screen
@@ -177,13 +177,18 @@ const devKey = e => [nameKey(e.mfr), nameKey(e.type), modelKey(e.model), nameKey
 function buildGroups(entries) {
   const map = new Map();
   entries.filter(e => e.kind === 'Diagram').forEach(e => map.set(devKey(e), { ...e, diagram: e, manual: null }));
-  entries.filter(e => e.kind === 'Manual').forEach(m => {
-    const exact = map.get(devKey(m));
-    if (exact) { exact.manual = exact.manual || m; return; }
-    const sameModel = [...map.values()].filter(g => g.diagram && !g.manual &&
-      nameKey(g.mfr) === nameKey(m.mfr) && nameKey(g.type) === nameKey(m.type) && modelKey(g.model) === modelKey(m.model));
-    if (sameModel.length) { sameModel.forEach(g => g.manual = m); return; }
-    map.set(devKey(m), { ...m, diagram: null, manual: m });
+  const manuals = entries.filter(e => e.kind === 'Manual');
+  // 1) A manual named exactly like a diagram belongs to that diagram.
+  const left = manuals.filter(m => { const g = map.get(devKey(m)); if (g && !g.manual) { g.manual = m; return false; } return !g; });
+  // 2) Otherwise it covers same-model diagrams whose variant starts with its variant
+  //    (a manual with no variant covers them all). Most specific manuals go first.
+  left.sort((a, b) => nameKey(b.variant).length - nameKey(a.variant).length).forEach(m => {
+    const v = nameKey(m.variant);
+    const fits = [...map.values()].filter(g => g.diagram && !g.manual &&
+      nameKey(g.mfr) === nameKey(m.mfr) && nameKey(g.type) === nameKey(m.type) &&
+      modelKey(g.model) === modelKey(m.model) && nameKey(g.variant).startsWith(v));
+    if (fits.length) fits.forEach(g => g.manual = m);
+    else map.set(devKey(m), { ...m, diagram: null, manual: m });
   });
   return [...map.values()].sort((a, b) =>
     a.mfr.localeCompare(b.mfr) || a.type.localeCompare(b.type) || a.model.localeCompare(b.model, undefined, { numeric: true }) || a.variant.localeCompare(b.variant));
