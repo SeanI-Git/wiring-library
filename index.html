@@ -113,6 +113,18 @@
   .pin input { width: 100%; text-align: center; font-size: 28px; letter-spacing: 8px; padding: 12px; border-radius: 8px;
                border: 2px solid var(--rule); background: var(--panel); margin: 14px 0; }
 
+  .ph-h { font-size: 18px; margin: 22px 0 8px; }
+  .ph-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  .ph { aspect-ratio: 4 / 3; border: 0; padding: 0; border-radius: 6px; overflow: hidden; background: var(--panel); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ph-load { color: var(--muted); font-size: 13px; padding: 6px; text-align: center; }
+  .lightbox { position: fixed; inset: 0; z-index: 20; background: #000; color: #fff; display: flex; flex-direction: column;
+              padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px); }
+  .lb-top, .lb-nav { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; }
+  .lb-top button, .lb-nav button { background: none; border: 1px solid #666; color: #fff; border-radius: 8px; padding: 10px 16px; font-size: 16px; cursor: pointer; }
+  .lb-img { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; touch-action: pinch-zoom; }
+  .lb-img img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .lb-cap { margin: 0; padding: 8px 16px; font-size: 16px; text-align: center; }
   .install p { margin: 0 0 12px; }
   .install-steps { background: var(--panel); border-radius: 8px; padding: 12px 14px 4px; margin: 14px 0 6px; }
   .install-steps ol { margin: 6px 0 10px; padding-left: 22px; }
@@ -176,7 +188,7 @@ const devKey = e => [nameKey(e.mfr), nameKey(e.type), modelKey(e.model), nameKey
 
 function buildGroups(entries) {
   const map = new Map();
-  entries.filter(e => e.kind === 'Diagram').forEach(e => map.set(devKey(e), { ...e, diagram: e, manual: null }));
+  entries.filter(e => e.kind === 'Diagram').forEach(e => map.set(devKey(e), { ...e, diagram: e, manual: null, photos: [] }));
   const manuals = entries.filter(e => e.kind === 'Manual');
   // 1) A manual named exactly like a diagram belongs to that diagram.
   const left = manuals.filter(m => { const g = map.get(devKey(m)); if (g && !g.manual) { g.manual = m; return false; } return !g; });
@@ -188,8 +200,21 @@ function buildGroups(entries) {
       nameKey(g.mfr) === nameKey(m.mfr) && nameKey(g.type) === nameKey(m.type) &&
       modelKey(g.model) === modelKey(m.model) && nameKey(g.variant).startsWith(v));
     if (fits.length) fits.forEach(g => g.manual = m);
-    else map.set(devKey(m), { ...m, diagram: null, manual: m });
+    else map.set(devKey(m), { ...m, diagram: null, manual: m, photos: [] });
   });
+  // 3) Photos show on every same-model device whose variant starts with the photo's variant
+  //    (a photo with no variant shows on all of them). With nothing to show on, a photo gets its own entry.
+  entries.filter(e => e.kind === 'Photo')
+    .sort((a, b) => String(a.fileName || a.id).localeCompare(String(b.fileName || b.id), undefined, { numeric: true }))
+    .forEach(p => {
+      const v = nameKey(p.variant);
+      const fits = [...map.values()].filter(g => (g.diagram || g.manual) &&
+        nameKey(g.mfr) === nameKey(p.mfr) && nameKey(g.type) === nameKey(p.type) &&
+        modelKey(g.model) === modelKey(p.model) && nameKey(g.variant).startsWith(v));
+      if (fits.length) { fits.forEach(g => g.photos.push(p)); return; }
+      const own = map.get(devKey(p));
+      if (own) own.photos.push(p); else map.set(devKey(p), { ...p, diagram: null, manual: null, photos: [p] });
+    });
   return [...map.values()].sort((a, b) =>
     a.mfr.localeCompare(b.mfr) || a.type.localeCompare(b.type) || a.model.localeCompare(b.model, undefined, { numeric: true }) || a.variant.localeCompare(b.variant));
 }
@@ -269,12 +294,15 @@ async function openDocCache() {
   try { return 'caches' in window ? await caches.open(DOC_CACHE) : null; } catch { return null; }
 }
 
-async function getDiagramBytes(entry, onRetry) {
+async function getDiagramBytes(entry, onRetry) { return (await getFile(entry, onRetry)).bytes; }
+
+/** A diagram or photo as { bytes, mime }: from the phone if it's saved there, otherwise from the library. */
+async function getFile(entry, onRetry) {
   const key = docKey(entry);
   const cache = await openDocCache();
   if (cache) {
     const hit = await cache.match(key);
-    if (hit) return new Uint8Array(await hit.arrayBuffer());
+    if (hit) return { bytes: new Uint8Array(await hit.arrayBuffer()), mime: hit.headers.get('Content-Type') || 'application/pdf' };
   }
   if (inflight.has(key)) return inflight.get(key);
   const job = (async () => {
@@ -283,13 +311,14 @@ async function getDiagramBytes(entry, onRetry) {
     try { bin = atob(j.b64); } catch { const e = new Error('The diagram arrived damaged.'); e.retry = true; throw e; }
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const mime = j.mime || (entry.kind === 'Photo' ? 'image/jpeg' : 'application/pdf');
     if (cache) {
       try {
-        await cache.put(key, new Response(bytes, { headers: { 'Content-Type': 'application/pdf' } }));
+        await cache.put(key, new Response(bytes, { headers: { 'Content-Type': mime } }));
         const m = docSizes(); m[new URL(key, location.href).pathname] = bytes.length; saveDocSizes(m);
       } catch { /* phone storage full: still show it, just don't keep it */ }
     }
-    return bytes;
+    return { bytes, mime };
   })();
   inflight.set(key, job);
   try { return await job; } finally { inflight.delete(key); }
@@ -311,13 +340,14 @@ async function prefetchAll() {
     const cache = await openDocCache();
     if (!cache) return;
     const todo = [];
-    const all = catalog.entries.filter(e => e.kind === 'Diagram');
+    const all = catalog.entries.filter(e => e.kind === 'Diagram' || e.kind === 'Photo');
     for (const e of all) {
       if (!(await cache.match(docKey(e)))) todo.push(e);
     }
     pf = { total: all.length, done: all.length - todo.length, active: todo.length > 0, full: false };
     showPf();
-    todo.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));   // newest first
+    // Diagrams first, then photos; newest first within each.
+    todo.sort((a, b) => (a.kind === 'Photo') - (b.kind === 'Photo') || String(b.updated).localeCompare(String(a.updated)));
     // Several downloads at once: each request spends most of its time waiting on Google,
     // so running a few side by side finishes the whole library several times faster.
     let next = 0, stop = false;
@@ -337,8 +367,8 @@ async function prefetchAll() {
 function pfText() {
   if (!STANDALONE || !pf.total) return '';
   if (pf.full) return `Storage limit reached (${fmtSize(PREFETCH_BUDGET_MB * 1048576)}). The newest diagrams are saved; others download when you open them.`;
-  if (pf.active) return `Saving diagrams for offline use: ${pf.done} of ${pf.total}…`;
-  if (pf.done >= pf.total) return `All ${pf.total} diagrams are saved on this phone and work offline.`;
+  if (pf.active) return `Saving diagrams and photos for offline use: ${pf.done} of ${pf.total}…`;
+  if (pf.done >= pf.total) return `All ${pf.total} diagrams and photos are saved on this phone and work offline.`;
   return '';
 }
 function showPf() { const el = document.getElementById('pf'); if (el) el.textContent = pfText(); }
@@ -458,8 +488,15 @@ function homeBody() {
 
 function deviceRow(g) {
   return `<a class="row" href="${devLink(g)}"><span class="main">
-      <div><span class="sleeve">${esc(g.model)}</span>${g.diagram ? '' : '<span class="tag">Manual only</span>'}</div>
+      <div><span class="sleeve">${esc(g.model)}</span>${tags(g)}</div>
       <div class="t2">${esc(g.mfr)} · ${esc(g.type)}${g.variant ? ' · ' + esc(g.variant) : ''}</div></span><span class="chev">›</span></a>`;
+}
+
+function tags(g) {
+  const t = [];
+  if (!g.diagram) t.push(g.manual ? 'Manual only' : 'Photos only');
+  if (g.photos && g.photos.length && (g.diagram || g.manual)) t.push(g.photos.length === 1 ? '1 photo' : g.photos.length + ' photos');
+  return t.map(x => `<span class="tag">${x}</span>`).join('');
 }
 
 function renderTypes(mfr) {
@@ -478,7 +515,7 @@ function renderModels(mfr, type) {
   const m = gs[0] ? gs[0].mfr : mfr, t = gs[0] ? gs[0].type : type;
   app.innerHTML = bar(t, true) + `<main>${banner()}<div class="crumbs"><a href="${link('m', m)}">${esc(m)}</a></div><h2>${esc(t)}</h2>
     ${gs.length ? `<div class="list">${gs.map(g => `<a class="row" href="${devLink(g)}"><span class="main">
-        <div><span class="sleeve">${esc(g.model)}</span>${g.diagram ? '' : '<span class="tag">Manual only</span>'}</div>
+        <div><span class="sleeve">${esc(g.model)}</span>${tags(g)}</div>
         ${g.variant ? `<div class="t2">${esc(g.variant)}</div>` : ''}</span><span class="chev">›</span></a>`).join('')}</div>`
       : `<div class="empty"><b>No devices here</b>Go back and search for the model number.</div>`}</main>`;
 }
@@ -500,21 +537,74 @@ function renderDoc(args) {
   const notes = [g.diagram && g.diagram.notes].filter(Boolean).map(n => `<div class="note">${esc(n)}</div>`).join('');
   const manualBtn = g.manual ? `<a class="btn" href="${esc(g.manual.url)}" target="_blank" rel="noopener">Full manual</a>` : '';
 
+  const photoBlock = g.photos && g.photos.length ? `<h3 class="ph-h">Photos of a correct install</h3>
+    <div class="ph-grid" id="photos">${g.photos.map((p, i) => `<button class="ph" data-act="photo" data-i="${i}" aria-label="Photo ${i + 1}${p.notes ? ': ' + esc(p.notes) : ''}">
+      <span class="ph-load">Loading…</span></button>`).join('')}</div>` : '';
+  currentPhotos = g.photos || [];
+
   if (!g.diagram) {
     app.innerHTML = bar(g.model, true) + `<main>${head}<div class="empty"><b>No wiring sheet for this one yet</b>
-      The full manufacturer manual is here. Look for the "Wiring" or "Electrical installation" section, and ask a journeyman or QA/QC if it isn't clear.
-      <div class="actions">${manualBtn.replace('class="btn"', 'class="btn primary"')}<button class="btn" data-act="flag" data-label="request">Ask for a wiring sheet</button></div></div></main>`;
-    app.dataset.doc = g.manual.id;
+      ${g.manual ? 'The full manufacturer manual is here. Look for the "Wiring" or "Electrical installation" section, and ask a journeyman or QA/QC if it isn\'t clear.' : 'There are photos of a correct install below. Ask a journeyman or QA/QC if anything isn\'t clear.'}
+      <div class="actions">${manualBtn.replace('class="btn"', 'class="btn primary"')}<button class="btn" data-act="flag" data-label="request">Ask for a wiring sheet</button></div></div>
+      ${photoBlock}</main>`;
+    app.dataset.doc = (g.manual || g.photos[0]).id;
+    showPhotos(++viewToken);
     return;
   }
 
   app.innerHTML = bar(g.model, true) + `<main>${banner()}${head}${notes}
     <div class="actions">${manualBtn}<button class="btn" data-act="save-pdf" disabled>Save PDF</button><button class="btn fault" data-act="flag">Doesn't match my device</button></div>
     <div class="pages" id="pages"><div class="page">Loading the diagram…</div></div>
+    ${photoBlock}
     ${!STANDALONE && (IOS || ANDROID) ? '<p class="foot">Tip: <a href="#/install">put GAFwire on your home screen</a> so diagrams open instantly and work offline.</p>' : ''}
     <p class="foot">Updated ${esc(g.diagram.updated)}. Check the nameplate and the job drawings before you land wires.</p></main>`;
   app.dataset.doc = g.diagram.id;
   showPdf(g.diagram, ++viewToken);
+  showPhotos(viewToken);
+}
+
+/* ---------------- install photos ---------------- */
+let currentPhotos = [];
+const photoUrls = new Map();   // id -> object URL, so a photo opens instantly the second time
+
+async function photoUrl(p) {
+  if (photoUrls.has(p.id)) return photoUrls.get(p.id);
+  const f = await getFile(p);
+  const u = URL.createObjectURL(new Blob([f.bytes], { type: f.mime }));
+  photoUrls.set(p.id, u);
+  return u;
+}
+
+async function showPhotos(token) {
+  for (let i = 0; i < currentPhotos.length; i++) {
+    if (token !== viewToken) return;
+    const btn = document.querySelector(`.ph[data-i="${i}"]`);
+    try {
+      const u = await photoUrl(currentPhotos[i]);
+      if (btn && token === viewToken) btn.innerHTML = `<img src="${u}" alt="">`;
+    } catch {
+      if (btn) btn.innerHTML = '<span class="ph-load">Needs WiFi the first time</span>';
+    }
+  }
+}
+
+function openPhoto(i) {
+  const p = currentPhotos[i]; if (!p) return;
+  const bg = document.createElement('div');
+  bg.className = 'lightbox';
+  bg.innerHTML = `<div class="lb-top"><span>${i + 1} of ${currentPhotos.length}</span><button data-lb="close" aria-label="Close">Close</button></div>
+    <div class="lb-img"><span class="ph-load">Loading…</span></div>
+    ${p.notes ? `<p class="lb-cap">${esc(p.notes)}</p>` : ''}
+    <div class="lb-nav">${i > 0 ? '<button data-lb="prev">‹ Previous</button>' : '<span></span>'}${i < currentPhotos.length - 1 ? '<button data-lb="next">Next ›</button>' : '<span></span>'}</div>`;
+  document.body.appendChild(bg);
+  photoUrl(p).then(u => { const el = bg.querySelector('.lb-img'); if (el) el.innerHTML = `<img src="${u}" alt="Photo ${i + 1}">`; })
+    .catch(() => { const el = bg.querySelector('.lb-img'); if (el) el.innerHTML = '<span class="ph-load">This photo needs WiFi the first time.</span>'; });
+  bg.addEventListener('click', e => {
+    const a = e.target.closest('[data-lb]'); if (!a) return;
+    bg.remove();
+    if (a.dataset.lb === 'prev') openPhoto(i - 1);
+    if (a.dataset.lb === 'next') openPhoto(i + 1);
+  });
 }
 
 let currentPdf = null;   // { bytes, name } for Save PDF
@@ -609,7 +699,7 @@ function renderInstall() {
     <p class="foot" style="text-align:center">In the browser, diagrams aren't saved for offline use.</p></main>`;
   api({ action: 'stats' }, 15000).then(j => {
     const el = document.getElementById('libsize');
-    if (el) el.textContent = `The library is ${fmtSize(j.diagramBytes || 0)} right now (${j.diagrams} diagrams). It will never use more than ${fmtSize(PREFETCH_BUDGET_MB * 1048576)} of storage.`;
+    if (el) el.textContent = `The library is ${fmtSize(j.diagramBytes || 0)} right now (${j.diagrams} diagrams${j.photos ? `, ${j.photos} photos` : ''}). It will never use more than ${fmtSize(PREFETCH_BUDGET_MB * 1048576)} of storage.`;
   }).catch(() => { /* size line is optional */ });
 }
 
@@ -685,6 +775,7 @@ document.addEventListener('click', e => {
   else if (act === 'reload-doc') render();
   else if (act === 'skip-install') { skipInstall = true; sessionStorage.setItem('wl-skip-install', '1'); if (location.hash !== '#/') location.hash = '#/'; else render(); }
   else if (act === 'print') window.print();
+  else if (act === 'photo') openPhoto(+b.dataset.i);
   else if (act === 'save-pdf' && currentPdf) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([currentPdf.bytes], { type: 'application/pdf' }));
