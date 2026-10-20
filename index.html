@@ -184,6 +184,9 @@ let loadError = '';
 /* ---------------- data ---------------- */
 const nameKey = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/s$/, '');
 const modelKey = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+/** A model field can list several models wired the same way: "2088, 2051, 3051". */
+const modelParts = m => String(m || '').split(/\s*,\s*|\s+or\s+|\s*&\s*/i).map(modelKey).filter(Boolean);
+const sameModel = (a, b) => { const B = modelParts(b); return modelParts(a).some(x => B.includes(x)); };
 const devKey = e => [nameKey(e.mfr), nameKey(e.type), modelKey(e.model), nameKey(e.variant)].join('|');
 
 function buildGroups(entries) {
@@ -198,7 +201,7 @@ function buildGroups(entries) {
     const v = nameKey(m.variant);
     const fits = [...map.values()].filter(g => g.diagram && !g.manual &&
       nameKey(g.mfr) === nameKey(m.mfr) && nameKey(g.type) === nameKey(m.type) &&
-      modelKey(g.model) === modelKey(m.model) && nameKey(g.variant).startsWith(v));
+      sameModel(g.model, m.model) && nameKey(g.variant).startsWith(v));
     if (fits.length) fits.forEach(g => g.manual = m);
     else map.set(devKey(m), { ...m, diagram: null, manual: m, photos: [] });
   });
@@ -210,7 +213,7 @@ function buildGroups(entries) {
       const v = nameKey(p.variant);
       const fits = [...map.values()].filter(g => (g.diagram || g.manual) &&
         nameKey(g.mfr) === nameKey(p.mfr) && nameKey(g.type) === nameKey(p.type) &&
-        modelKey(g.model) === modelKey(p.model) && nameKey(g.variant).startsWith(v));
+        sameModel(g.model, p.model) && nameKey(g.variant).startsWith(v));
       if (fits.length) { fits.forEach(g => g.photos.push(p)); return; }
       const own = map.get(devKey(p));
       if (own) own.photos.push(p); else map.set(devKey(p), { ...p, diagram: null, manual: null, photos: [p] });
@@ -399,16 +402,16 @@ function score(g, q) {
   if (!tokens.length) return 0;
   const words = [g.mfr, g.type, g.variant, (g.diagram || {}).keywords, (g.manual || {}).keywords, aliasText(g)].join(' ').toLowerCase();
   const wordList = words.split(/[^a-z0-9]+/).filter(Boolean);
-  const mk = modelKey(g.model);
+  const mks = modelParts(g.model);
   let total = 0;
   for (const t of tokens) {
     const tl = t.toLowerCase(), tk = modelKey(t);
     let s = 0;
-    if (tk && mk) {
-      if (tk === mk) s = 100;
-      else if (mk.length >= 3 && tk.startsWith(mk)) s = 80 + mk.length;   // full nameplate code typed in
-      else if (tk.length >= 2 && mk.startsWith(tk)) s = 70;
-      else if (tk.length >= 3 && mk.includes(tk)) s = 50;
+    for (const mk of tk ? mks : []) {
+      if (tk === mk) s = Math.max(s, 100);
+      else if (mk.length >= 3 && tk.startsWith(mk)) s = Math.max(s, 80 + mk.length);   // full nameplate code typed in
+      else if (tk.length >= 2 && mk.startsWith(tk)) s = Math.max(s, 70);
+      else if (tk.length >= 3 && mk.includes(tk)) s = Math.max(s, 50);
     }
     if (wordList.some(w => w === tl)) s = Math.max(s, 45);
     else if (wordList.some(w => w.startsWith(tl))) s = Math.max(s, 35);
