@@ -400,12 +400,19 @@ function aliasText(g) {
 function score(g, q) {
   const tokens = q.trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return 0;
-  const words = [g.mfr, g.type, g.variant, (g.diagram || {}).keywords, (g.manual || {}).keywords, aliasText(g)].join(' ').toLowerCase();
+  const words = [g.mfr, g.type, g.variant, (g.diagram || {}).keywords, (g.manual || {}).keywords,
+    ...(g.photos || []).map(p => p.keywords), aliasText(g)].join(' ').toLowerCase();
   const wordList = words.split(/[^a-z0-9]+/).filter(Boolean);
   const mks = modelParts(g.model);
+  // Tag prefixes: any search word like "B-", "EF-" or "PIT-4162" makes its letters a prefix,
+  // so B-3000, B-10000, PIT-4290 or PIT-xxxx all find the sheet no matter what follows the dash.
+  const prefixes = new Set([...(' ' + words).matchAll(/[^a-z0-9]([a-z]{1,6})-/g)].map(m => m[1]));
   let total = 0;
-  for (const t of tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
     const tl = t.toLowerCase(), tk = modelKey(t);
+    // "PIT 4290" typed with a space counts the same as "PIT-4290".
+    if (/^[a-z]{1,6}$/.test(tl) && prefixes.has(tl) && /^\d+[a-z]?$/i.test(tokens[i + 1] || '')) { total += 60; i++; continue; }
     let s = 0;
     for (const mk of tk ? mks : []) {
       if (tk === mk) s = Math.max(s, 100);
@@ -413,9 +420,13 @@ function score(g, q) {
       else if (tk.length >= 2 && mk.startsWith(tk)) s = Math.max(s, 70);
       else if (tk.length >= 3 && mk.includes(tk)) s = Math.max(s, 50);
     }
-    if (wordList.some(w => w === tl)) s = Math.max(s, 45);
-    else if (wordList.some(w => w.startsWith(tl))) s = Math.max(s, 35);
+    // Words are compared piece by piece, so a tag typed as "PIT-4163" finds "PIT-4162/4163" in the search words.
+    const parts = tl.split(/[^a-z0-9]+/).filter(Boolean);
+    if (parts.length && parts.every(p => wordList.includes(p))) s = Math.max(s, 45);
+    else if (parts.length && parts.every(p => wordList.some(w => w.startsWith(p)))) s = Math.max(s, 35);
     else if (tl.length >= 3 && words.includes(tl)) s = Math.max(s, 20);
+    const tag = tl.match(/^([a-z]{1,6})(?:-.*|\d+[a-z]?)?$/);
+    if (tag && prefixes.has(tag[1])) s = Math.max(s, 60);
     if (!s) return 0;           // every word has to match something
     total += s;
   }
@@ -438,7 +449,7 @@ function bar(title, back, withSearch) {
       ${back ? `<button class="back" data-act="back" aria-label="Back">‹ Back</button>` : ''}
       <h1>${esc(title)}</h1></div>
       ${withSearch ? `<div class="search"><input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-        placeholder="Brand or model number" value="${esc(query)}" aria-label="Search">
+        placeholder="Brand, type, model, or P&amp;ID tag" value="${esc(query)}" aria-label="Search">
         <button data-act="clear" aria-label="Clear search">Clear</button></div>` : ''}
     </div>`;
 }
