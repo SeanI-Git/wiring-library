@@ -259,6 +259,48 @@ async function withRetry(fn, tries, onRetry) {
   }
 }
 
+/* ---------------- anonymous usage counts ----------------
+   Each phone gets a random ID (no names, nothing about the phone itself). Events wait in a queue
+   and are sent in the background, so nothing here can slow down or block the app. */
+const LS_USE = 'wl-usage', LS_DEV = 'wl-device';
+function deviceId() {
+  let d = localStorage.getItem(LS_DEV);
+  if (!d) {
+    d = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now()).replace(/[^A-Za-z0-9]/g, '').slice(0, 12);
+    try { localStorage.setItem(LS_DEV, d); } catch { /* private mode */ }
+  }
+  return d;
+}
+function track(event, detail) {
+  try {
+    const q = JSON.parse(localStorage.getItem(LS_USE) || '[]');
+    q.push({ t: Date.now(), event, detail: String(detail || '').slice(0, 120) });
+    localStorage.setItem(LS_USE, JSON.stringify(q.slice(-200)));   // never let the queue grow unbounded
+  } catch { /* not critical */ }
+  clearTimeout(track.timer);
+  track.timer = setTimeout(sendUsage, 4000);
+}
+let sendingUsage = false;
+async function sendUsage() {
+  if (sendingUsage || !navigator.onLine || !CFG.API_URL || CFG.API_URL.includes('PASTE')) return;
+  let q;
+  try { q = JSON.parse(localStorage.getItem(LS_USE) || '[]'); } catch { q = []; }
+  if (!q.length) return;
+  sendingUsage = true;
+  const batch = q.slice(0, 50);
+  try {
+    const r = await fetch(CFG.API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, keepalive: true,
+      body: JSON.stringify({ action: 'usage', pin: localStorage.getItem(LS.pin) || '', device: deviceId(), mode: STANDALONE ? 'installed' : 'browser', events: batch }) });
+    const j = await r.json();
+    if (j.ok) {
+      const now = JSON.parse(localStorage.getItem(LS_USE) || '[]');
+      localStorage.setItem(LS_USE, JSON.stringify(now.slice(batch.length)));
+      if (now.length > batch.length) setTimeout(sendUsage, 1000);
+    }
+  } catch { /* offline or a Google hiccup: try again later */ }
+  finally { sendingUsage = false; }
+}
+
 async function loadCatalog() {
   try {
     const saved = JSON.parse(localStorage.getItem(LS.cat) || 'null');
@@ -487,6 +529,9 @@ function homeBody() {
   let body;
   if (query.trim()) {
     const hits = groups.map(g => [g, score(g, query)]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 60).map(x => x[0]);
+    // Count a search that found nothing once the person stops typing.
+    clearTimeout(homeBody.miss);
+    if (!hits.length && query.trim().length >= 3) { const q = query.trim(); homeBody.miss = setTimeout(() => { if (query.trim() === q) track('nofind', q); }, 2500); }
     body = hits.length ? `<div class="list">${hits.map(deviceRow).join('')}</div>`
       : `<div class="empty"><b>Nothing matches “${esc(query)}”</b>Try just the brand, or the first few characters of the model number.</div>`;
   } else if (!groups.length) {
@@ -535,6 +580,7 @@ function renderModels(mfr, type) {
 }
 
 let viewToken = 0;
+let lastViewed = '';
 function renderDoc(args) {
   const [mfr, type, model, variant = ''] = args;
   const want = [nameKey(mfr), nameKey(type), modelKey(model), nameKey(variant)].join('|');
@@ -555,6 +601,8 @@ function renderDoc(args) {
     <div class="ph-grid" id="photos">${g.photos.map((p, i) => `<button class="ph" data-act="photo" data-i="${i}" aria-label="Photo ${i + 1}${p.notes ? ': ' + esc(p.notes) : ''}">
       <span class="ph-load">Loading…</span></button>`).join('')}</div>` : '';
   currentPhotos = g.photos || [];
+  const label = [g.mfr, g.model, g.variant].filter(Boolean).join(' ');
+  if (label !== lastViewed) { lastViewed = label; track('view', label); }
 
   if (!g.diagram) {
     app.innerHTML = bar(g.model, true) + `<main>${head}<div class="empty"><b>No wiring sheet for this one yet</b>
@@ -803,6 +851,9 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 render();
 loadCatalog();
+track('open', STANDALONE ? 'home screen' : 'browser');
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') sendUsage(); else track('open', STANDALONE ? 'home screen' : 'browser'); });
+window.addEventListener('online', sendUsage);
 </script>
 </body>
 </html>
